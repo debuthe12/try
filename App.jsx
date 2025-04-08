@@ -5,11 +5,13 @@ import {
   View,
   Text,
   TouchableOpacity,
-  Platform // Keep for potential future use
+  Platform,
+  StatusBar, // Import StatusBar
 } from 'react-native';
 import Video from 'react-native-video';
 import dgram from 'react-native-udp';
 import { FFmpegKit, ReturnCode, FFmpegKitConfig } from 'ffmpeg-kit-react-native';
+import Orientation from 'react-native-orientation-locker'; // Import Orientation Locker
 
 // --- Constants ---
 const TELLO_IP = '192.168.10.1';
@@ -32,6 +34,9 @@ const App = () => {
     console.log('Cleaning up...');
     setIsStreaming(false);
     setErrorMessage('');
+
+    // Unlock orientation on cleanup (optional, good practice)
+    Orientation.unlockAllOrientations();
 
     // Cancel FFmpeg
     if (ffmpegSessionId.current) {
@@ -60,9 +65,13 @@ const App = () => {
 
   // --- Setup & Teardown Effects ---
   useEffect(() => {
-    // Enable FFmpegKit logs - VERY IMPORTANT FOR DEBUGGING FFmpeg
+    // --- Lock Orientation to Landscape ---
+    Orientation.lockToLandscape();
+    console.log('Locked to Landscape');
+
+    // Enable FFmpegKit logs
     FFmpegKitConfig.enableLogCallback(log => console.log(`FFmpegKit Log: ${log.getMessage()}`));
-    FFmpegKitConfig.enableStatisticsCallback(stats => console.log(`FFmpegKit Stats: ${JSON.stringify(stats)}`)); // Can be noisy, but useful
+    FFmpegKitConfig.enableStatisticsCallback(stats => console.log(`FFmpegKit Stats: ${JSON.stringify(stats)}`));
 
     // Cleanup on component unmount
     return () => {
@@ -70,7 +79,7 @@ const App = () => {
     };
   }, [cleanup]); // Depend on cleanup
 
-  // --- Send Command (Corrected - No Buffer) ---
+  // --- Send Command ---
   const sendCommand = (command) => {
     return new Promise((resolve, reject) => {
       if (!commandSocket.current) {
@@ -78,7 +87,6 @@ const App = () => {
         return reject(new Error("Socket not initialized"));
       }
       console.log(`Sending command: ${command}`);
-      // Use the 'command' string directly
       commandSocket.current.send(command, 0, command.length, TELLO_COMMAND_PORT, TELLO_IP, (err) => {
         if (err) {
           console.error(`Failed to send command ${command}:`, err);
@@ -94,33 +102,22 @@ const App = () => {
 
   // --- Start FFmpeg Process ---
   const startFFmpeg = async () => {
-    // Reset previous errors if any
     setErrorMessage('');
-
-    // Ensure no lingering session
     if (ffmpegSessionId.current) {
         console.warn("FFmpeg session already exists, cancelling previous one.");
         await FFmpegKit.cancel(ffmpegSessionId.current);
         ffmpegSessionId.current = null;
     }
 
-    // --- FFmpeg Command (Corrected - Removed unsupported UDP options) ---
     const ffmpegCommand = `-f h264 -analyzeduration 1000000 -probesize 1000000 -fflags discardcorrupt -fflags nobuffer -flags low_delay -avioflags direct -i udp://0.0.0.0:${LOCAL_VIDEO_INPUT_PORT}?timeout=5000000 -c:v copy -f mpegts -listen 1 http://127.0.0.1:${LOCAL_VIDEO_OUTPUT_HTTP_PORT}`;
-    // Note: Removed '&fifo_size=1000000&overrun_nonfatal=1' from the UDP URL
-
-
     console.log("Starting FFmpeg with command:", ffmpegCommand);
 
     try {
-      // Execute FFmpeg asynchronously
       const session = await FFmpegKit.executeAsync(ffmpegCommand,
         async (completedSession) => {
-            // --- FFmpeg Completion Callback ---
             const returnCode = await completedSession.getReturnCode();
             const sessionId = completedSession.getSessionId();
             console.log(`FFmpeg session ${sessionId} completed.`);
-
-            // Clear the session ID regardless of outcome for this specific session
              if (ffmpegSessionId.current === sessionId) {
                  ffmpegSessionId.current = null;
              }
@@ -129,28 +126,23 @@ const App = () => {
                 console.log('FFmpeg process finished successfully.');
                 if (isStreaming) {
                     console.warn("FFmpeg exited successfully while streaming was active.");
-                    // setErrorMessage("Stream ended."); // Optional
-                    // setIsStreaming(false);
                 }
             } else if (ReturnCode.isCancel(returnCode)) {
-                console.log('FFmpeg process cancelled.'); // Expected on cleanup
+                console.log('FFmpeg process cancelled.');
             } else {
-                // ***** KEY ERROR HANDLING *****
                 console.error('FFmpeg process failed!');
-                const logs = await completedSession.getAllLogsAsString(); // Get ALL logs
+                const logs = await completedSession.getAllLogsAsString();
                 console.error('------ FFmpeg Logs Start ------');
-                console.error(logs || 'No logs captured.'); // Log the detailed FFmpeg output
+                console.error(logs || 'No logs captured.');
                 console.error('------ FFmpeg Logs End --------');
                 setErrorMessage('FFmpeg Error! Check console logs for details.');
-                setIsStreaming(false); // Stop showing video on FFmpeg error
-                // ***** END KEY ERROR HANDLING *****
+                setIsStreaming(false);
             }
         }
       );
 
       ffmpegSessionId.current = await session.getSessionId();
       console.log('FFmpeg session starting with ID:', ffmpegSessionId.current);
-      // Set streaming true, player will handle its own load/error state visually
       setIsStreaming(true);
 
     } catch (error) {
@@ -168,28 +160,24 @@ const App = () => {
         return;
     }
 
-    setErrorMessage(''); // Clear previous errors
-    setIsStreaming(false); // Reset streaming state initially
+    setErrorMessage('');
+    setIsStreaming(false);
 
     try {
-      // 1. Create Socket
       console.log('Creating UDP command socket...');
       commandSocket.current = dgram.createSocket({ type: 'udp4' });
 
-      // Basic error handler
       commandSocket.current.on('error', (err) => {
         const errorMsg = `UDP Socket error: ${err.message}`;
         console.error(errorMsg, err);
         setErrorMessage(errorMsg);
-        cleanup(); // Cleanup on socket error
+        cleanup();
       });
 
-      // Basic message handler (just logs responses)
       commandSocket.current.on('message', (msg, rinfo) => {
         console.log(`Drone response: ${msg.toString()} from ${rinfo.address}:${rinfo.port}`);
       });
 
-      // 2. Bind Socket
       await new Promise((resolve, reject) => {
         commandSocket.current.bind(LOCAL_COMMAND_PORT_BIND, (err) => {
           if (err) {
@@ -203,56 +191,51 @@ const App = () => {
         });
       });
 
-      // 3. Send Initial Commands (with simple delays)
       await sendCommand('command');
-      await new Promise(resolve => setTimeout(resolve, 500)); // Simple delay
-
+      await new Promise(resolve => setTimeout(resolve, 500));
       await sendCommand('streamon');
-      await new Promise(resolve => setTimeout(resolve, 500)); // Simple delay
+      await new Promise(resolve => setTimeout(resolve, 500));
 
       console.log("Drone commands sent. Starting FFmpeg...");
-
-      // 4. Start FFmpeg
       await startFFmpeg();
 
     } catch (error) {
       console.error("Initialization failed:", error);
       setErrorMessage(`Initialization failed: ${error.message}`);
-      await cleanup(); // Ensure cleanup on failure
+      await cleanup();
     }
   };
 
   // --- Button Handler for Disconnect ---
   const handleDisconnectPress = () => {
     console.log("Disconnect button pressed.");
-    cleanup(); // Trigger manual cleanup
+    cleanup();
   }
 
   // --- Video Player Callbacks ---
   const onVideoLoad = () => {
     console.log('Video player loaded stream successfully!');
-    // Clear errors if video loads after a previous failure
     if (errorMessage) {
         setErrorMessage('');
     }
   };
 
   const onVideoError = (err) => {
-    // ***** VIDEO PLAYER ERROR HANDLING *****
-    console.error('Video player error:', JSON.stringify(err, null, 2)); // Log the full error object
+    console.error('Video player error:', JSON.stringify(err, null, 2));
     const videoErrorMsg = err.error?.localizedDescription || err.error?.localizedFailureReason || err.error?.message || 'Unknown video player error';
     setErrorMessage(`Video Player Error: ${videoErrorMsg}. Check console.`);
-    // Consider setting isStreaming to false or adding retry logic if desired
-    // setIsStreaming(false);
-    // ***** END VIDEO PLAYER ERROR HANDLING *****
   };
 
 
   return (
-    <SafeAreaView style={styles.container}>
+    // Use a standard View instead of SafeAreaView for true fullscreen without potential safe area insets
+    <View style={styles.container}>
+      {/* Hide the status bar */}
+      <StatusBar hidden={true} />
+
       <View style={styles.content}>
 
-        {/* Error Display Area */}
+        {/* Error Display Area (kept absolute positioning) */}
         {errorMessage ? (
           <View style={styles.errorContainer}>
             <Text style={styles.errorText}>{errorMessage}</Text>
@@ -266,14 +249,17 @@ const App = () => {
               ref={videoPlayerRef}
               source={{ uri: `http://127.0.0.1:${LOCAL_VIDEO_OUTPUT_HTTP_PORT}` }}
               style={styles.video}
-              resizeMode="contain"
-              onError={onVideoError} // Use the error handler
-              onLoad={onVideoLoad}   // Use the load handler
-              // *** REMOVED bufferConfig prop to use defaults ***
+              resizeMode="contain" // Or "cover" for full screen fill if aspect ratio differs
+              onError={onVideoError}
+              onLoad={onVideoLoad}
               repeat={false}
               muted={false}
               allowsExternalPlayback={false}
-              paused={!isStreaming} // Explicitly pause if not streaming
+              paused={!isStreaming}
+              // Note: react-native-video also has a 'fullscreen' prop, but we are
+              // controlling the whole app's fullscreen state here. You might use
+              // the player's fullscreen prop if you wanted *only* the video to
+              // go fullscreen on demand (e.g., via a button).
             />
           ) : (
             <View style={styles.placeholder}>
@@ -283,8 +269,10 @@ const App = () => {
         </View>
 
         {/* Control Buttons */}
+        {/* Consider moving buttons to overlay on top of video for true fullscreen? */}
+        {/* For now, kept at bottom */}
         <View style={styles.buttonContainer}>
-          {!isStreaming && !commandSocket.current && !ffmpegSessionId.current ? ( // Show Start only when fully disconnected
+          {!isStreaming && !commandSocket.current && !ffmpegSessionId.current ? (
               <TouchableOpacity
                 style={styles.button}
                 onPress={handleStartStream}
@@ -301,42 +289,44 @@ const App = () => {
            )}
         </View>
       </View>
-    </SafeAreaView>
+    </View>
   );
 };
 
-// --- Styles (Simplified) ---
+// --- Styles (Adjusted slightly) ---
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#e0e0e0',
+    backgroundColor: '#000', // Make background black for fullscreen feel
   },
   content: {
     flex: 1,
-    justifyContent: 'space-between',
+    justifyContent: 'space-between', // Keep buttons at bottom for now
+     // Remove padding if you want edge-to-edge video/controls
   },
   errorContainer: {
-    backgroundColor: '#ffcdd2', // Light red
+    backgroundColor: 'rgba(255, 205, 210, 0.8)', // Semi-transparent error background
     padding: 10,
     margin: 10,
     borderRadius: 4,
-    position: 'absolute', // Overlay on top
-    top: 10,
+    position: 'absolute',
+    top: 10, // Adjust positioning as needed in landscape
     left: 10,
     right: 10,
-    zIndex: 10, // Ensure it's above video
+    zIndex: 10,
   },
   errorText: {
-    color: '#b71c1c', // Dark red
+    color: '#b71c1c',
     fontSize: 14,
     textAlign: 'center',
   },
   videoContainer: {
-    flex: 1, // Take available space
+    flex: 1, // Take most space
     backgroundColor: '#000',
-    marginVertical: 10, // Some margin around video
     justifyContent: 'center',
     alignItems: 'center',
+    // Remove margin if you want edge-to-edge video
+    // marginVertical: 10,
   },
   video: {
     width: '100%',
@@ -347,20 +337,32 @@ const styles = StyleSheet.create({
     height: '100%',
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: '#666', // Dark placeholder
+    backgroundColor: '#333', // Darker placeholder
   },
   buttonContainer: {
-    padding: 20,
-    paddingBottom: 40, // Extra padding at bottom
+    // Make buttons overlay on bottom? Example:
+    position: 'absolute',
+    bottom: 20,
+    left: 20,
+    right: 20,
+    zIndex: 5, // Ensure buttons are above video if overlaying
+    flexDirection: 'row', // Arrange buttons side-by-side if needed
+    justifyContent: 'center', // Center button(s)
+
+    // Original styles (buttons below video):
+    // padding: 20,
+    // paddingBottom: 40,
   },
   button: {
-    backgroundColor: '#2196F3', // Blue
-    paddingVertical: 15,
-    borderRadius: 8,
+    backgroundColor: 'rgba(33, 150, 243, 0.7)', // Semi-transparent buttons
+    paddingVertical: 12, // Slightly smaller padding
+    paddingHorizontal: 25,
+    borderRadius: 20, // Rounded buttons
     alignItems: 'center',
+    marginHorizontal: 10, // Space if multiple buttons
   },
   disconnectButton: {
-      backgroundColor: '#f44336', // Red
+      backgroundColor: 'rgba(244, 67, 54, 0.7)', // Semi-transparent red
   },
   buttonText: {
     color: '#fff',

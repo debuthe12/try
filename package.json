@@ -10,10 +10,13 @@
     "test": "jest"
   },
   "dependencies": {
+    "@react-native-camera-roll/camera-roll": "^7.10.0",
     "@react-native-community/netinfo": "^11.4.1",
     "ffmpeg-kit-react-native": "^6.0.2",
     "react": "19.0.0",
     "react-native": "0.78.2",
+    "react-native-fs": "^2.20.0",
+    "react-native-orientation-locker": "^1.7.0",
     "react-native-udp": "^4.1.7",
     "react-native-video": "^6.12.0"
   },
